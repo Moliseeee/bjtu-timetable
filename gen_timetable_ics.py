@@ -4,9 +4,15 @@
 用法: python gen_timetable_ics.py [--start 2026-09-07] [--weeks 16]
 默认: 第1周周一 = 2026-08-31, 共16周 (实际学期用 --start 指定)
 生成: 脚本同目录 bjtu-timetable-2026-2027-1.ics
+
+节假日处理:
+- NO_CLASS_DATES: 停课日期(全校放假), 落在其中的课程实例自动 EXDATE 剔除
+- EXTRA_CLASSES:  调休补课 {补课日期: 按周几(1=周一..7=周日)的课表上}, 生成一次性事件
+  依据: 国务院办公厅关于2026年部分节假日安排的通知(2025-11-04发布)
+        中秋 9/25(五)-27(日)放假; 国庆 10/1(四)-7(三)放假调休
+        学校调休补课安排以教务处通知为准, 收到后填入 EXTRA_CLASSES
 """
 import argparse
-import hashlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +30,23 @@ PERIODS = {
     6: (19, 0, 20, 50),    # 第6节 19:00-20:50
     7: (21, 0, 21, 50),    # 第7节 21:00-21:50
 }
+
+# ---------------- 节假日 (公历日期) ----------------
+def daterange(a, b):
+    """闭区间 [a,b] 的日期序列"""
+    cur, out = a, []
+    while cur <= b:
+        out.append(cur)
+        cur += timedelta(days=1)
+    return out
+
+NO_CLASS_DATES = set(
+    daterange(date(2026, 9, 25), date(2026, 9, 27)) +   # 中秋节 9/25(五)-27(日)
+    daterange(date(2026, 10, 1), date(2026, 10, 7))     # 国庆节 10/1(四)-7(三)
+)
+# 调休补课 {补课日期: 按周几课表(1=周一..7=周日)} — 待学校通知后填入, 例:
+# EXTRA_CLASSES = {date(2026,10,10): 1}   # 10/10(周六) 按周一课表上课
+EXTRA_CLASSES = {}
 
 # ---------------- 课程数据 ----------------
 # slot = (weekday 1=周一..7=周日, period, start_week, end_week, interval)
@@ -95,39 +118,74 @@ def main():
     if start_monday.weekday() != 0:
         raise SystemExit(f"起始日必须是周一: {args.start} 是星期{start_monday.isoformat()}")
 
+    def week_of(d):
+        return (d - start_monday).days // 7 + 1   # d 所在教学周
+
     events = []
     uid_seed = 1
+    total_exdates = 0
     for c in COURSES:
         for (wd, period, sw, ew, iv) in c["slots"]:
             sh, sm, eh, em = PERIODS[period]
             count = (ew - sw) // iv + 1
-            # 第一次上课的本地时间
             first_day = start_monday + timedelta(days=(sw - 1) * 7 + (wd - 1))
-            start_dt = datetime(first_day.year, first_day.month, first_day.day, sh, sm)
-            end_dt = datetime(first_day.year, first_day.month, first_day.day, eh, em)
-            # 间隔处理: RRULE INTERVAL
-            interval_txt = ""
-            if iv == 2:
-                interval_txt = ";INTERVAL=2"
+            # 枚举全部实例, 命中的停课日 -> EXDATE
+            exdates = []
+            for i in range(count):
+                inst = first_day + timedelta(days=i * 7 * iv)
+                if inst in NO_CLASS_DATES:
+                    st_dt = datetime(inst.year, inst.month, inst.day, sh, sm)
+                    exdates.append(fmt_utc(to_utc(st_dt)))
+            interval_txt = ";INTERVAL=2" if iv == 2 else ""
             week_note = f"第{sw}-{ew}周" + ("(隔周)" if iv == 2 else "")
             desc = f"课程号:{c['code']} 教师:{c['teacher']} 周次:{week_note}"
             loc = LOCATIONS.get((c["name"], period), "海淀西校区")
             uid = f"bjtu-2026-2027-1-{uid_seed:03d}"
             uid_seed += 1
-            summary = c["name"]
             lines = [
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
                 f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
-                f"DTSTART:{fmt_utc(to_utc(start_dt))}",
-                f"DTEND:{fmt_utc(to_utc(end_dt))}",
-                f"SUMMARY:{esc(summary)}",
+                f"DTSTART:{fmt_utc(to_utc(datetime(first_day.year, first_day.month, first_day.day, sh, sm)))}",
+                f"DTEND:{fmt_utc(to_utc(datetime(first_day.year, first_day.month, first_day.day, eh, em)))}",
+                f"SUMMARY:{esc(c['name'])}",
                 f"DESCRIPTION:{esc(desc)}",
                 f"LOCATION:{esc(loc)}",
                 f"RRULE:FREQ=WEEKLY;COUNT={count}{interval_txt}",
-                "END:VEVENT",
             ]
+            if exdates:
+                lines.append("EXDATE:" + ",".join(exdates))
+                total_exdates += len(exdates)
+            lines.append("END:VEVENT")
             events.append("\r\n".join(lines))
+
+    # 调休补课: 一次性事件 (该日按指定 weekday 的课表上课)
+    extra_n = 0
+    for edate, follow_wd in sorted(EXTRA_CLASSES.items()):
+        wk = week_of(edate)
+        for c in COURSES:
+            for (wd, period, sw, ew, iv) in c["slots"]:
+                if wd != follow_wd or not (sw <= wk <= ew):
+                    continue
+                if (wk - sw) % iv != 0:
+                    continue
+                sh, sm, eh, em = PERIODS[period]
+                uid = f"bjtu-2026-2027-1-extra-{edate:%Y%m%d}-{uid_seed:03d}"
+                uid_seed += 1
+                loc = LOCATIONS.get((c["name"], period), "海淀西校区")
+                lines = [
+                    "BEGIN:VEVENT",
+                    f"UID:{uid}",
+                    f"DTSTAMP:{datetime.now().strftime('%Y%m%dT%H%M%SZ')}",
+                    f"DTSTART:{fmt_utc(to_utc(datetime(edate.year, edate.month, edate.day, sh, sm)))}",
+                    f"DTEND:{fmt_utc(to_utc(datetime(edate.year, edate.month, edate.day, eh, em)))}",
+                    f"SUMMARY:{esc(c['name'])}",
+                    f"DESCRIPTION:{esc(c['code'])} 教师:{esc(c['teacher'])} 调休补课(按周{follow_wd}课表)",
+                    f"LOCATION:{esc(loc)}",
+                    "END:VEVENT",
+                ]
+                events.append("\r\n".join(lines))
+                extra_n += 1
 
     ics_body = (
         "BEGIN:VCALENDAR\r\n"
@@ -145,9 +203,8 @@ def main():
     with open(out, "w", encoding="utf-8", newline="") as f:
         f.write(ics_body)
     print(f"OK 生成 {out}")
-    print(f"事件数: {ics_body.count('BEGIN:VEVENT')} 个 (规则展开前的模板事件)")
-    print(f"首个DTSTART: {events[0].splitlines()[3]}")
-    # 抽查最后一个事件的起始
+    print(f"模板事件: {ics_body.count('BEGIN:VEVENT')} 个 (含 {extra_n} 个补课一次性事件)")
+    print(f"EXDATE 停课实例: {total_exdates} 个 (节假日课程剔除)")
     print(f"学期跨度: {start_monday} ~ {start_monday + timedelta(days=args.weeks * 7 - 1)}")
 
 if __name__ == "__main__":
