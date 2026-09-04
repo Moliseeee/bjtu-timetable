@@ -1,0 +1,2 @@
+# iCal 规范要求 CRLF 行结束 — 禁止 git 做换行转换
+*.ics -text
