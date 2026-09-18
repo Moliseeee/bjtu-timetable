@@ -69,20 +69,25 @@ print("建仓库:", st, r.get("full_name") or r.get("message"))
 if st not in (201, 422):
     sys.exit("建仓库失败,中止")
 
-# 2) git push (SSH 被拒 → 用 HTTPS+PAT 直推)
+# 2) git push (SSH 被拒 → 用 HTTPS+PAT 直推; 关掉残留代理, 临时脚本不入库)
 d = r"D:\课表ics"
 def git(*a, **kw):
-    cmd = ["git", "-C", d, "-c", "credential.helper="] + list(a)
+    cmd = ["git", "-C", d, "-c", "credential.helper=",
+           "-c", "http.proxy=", "-c", "https.proxy=",
+           "-c", "http.https://github.com.proxy="] + list(a)
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
-    print(f"$ git {' '.join(a)}\n{p.stdout}{p.stderr}".rstrip())
+    out = (p.stdout + p.stderr).replace(TOKEN, "ghp_***")
+    print(f"$ git {' '.join(a)}\n{out}".rstrip())
     return p
 
+for f in ("_find_pat.py", "_publish_freshman.py", "_verify_freshman_deep.py"):
+    git("rm", "--cached", "-q", f)
 git("add", "-A")
 git("-c", "user.name=Moliseeee", "-c", "user.email=molisemolise@github.com",
     "commit", "-m", "freshman: add classmate timetable ICS (2026-2027-1)")
-git("remote", "remove", "origin-fresh") if git("remote").stdout.find("origin-fresh") >= 0 else None
 git("remote", "add", "origin-fresh", f"https://github.com/{OWNER}/{REPO}.git")
-p = git("push", f"https://{OWNER}:{TOKEN}@github.com/{OWNER}/{REPO}.git", "main:main", "--force")
+p = git("push", f"https://{OWNER}:{TOKEN}@github.com/{OWNER}/{REPO}.git",
+        "main:main", "--force", "origin-fresh")
 if p.returncode != 0:
     sys.exit("push 失败,中止")
 
