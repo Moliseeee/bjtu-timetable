@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # ---------------- 参数 ----------------
-DEFAULT_START = date(2026, 8, 31)   # 第1周周一(如校历不同改这里或 --start)
+DEFAULT_START = date(2026, 9, 7)   # 第1周周一(2026-2027-1 用户确认; 如校历不同改这里或 --start)
 TOTAL_WEEKS = 16
 
 # 节次时间表: 节次 -> (开始时分, 结束时分)
