@@ -1,7 +1,0 @@
-# iCal 规范要求 CRLF 行结束 — 禁止 git 做换行转换
-*.ics -text
-
-# 临时脚本 / Python 缓存, 不入库
-_*.py
-__pycache__/
-*.pyc
